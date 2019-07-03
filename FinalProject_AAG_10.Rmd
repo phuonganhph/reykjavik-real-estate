@@ -1,0 +1,1114 @@
+---
+title: "Final Project"
+author: "Anh Ngoc Phuong Pham, Anna Margrét Halldórsdóttir & Guðrún Óskarsdóttir"
+date: "Spring 2019"
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    code_folding: show
+---
+
+$~$
+
+```{r, warning=FALSE, message=FALSE}
+library(lubridate)
+library(tidyverse)
+library(gridExtra)
+library(grid)
+library(kableExtra)
+library(dplyr)
+library(dummies)
+library(car)
+library(glmnet)
+library(leaps)
+library(caret)
+library(pls)
+library(MASS)
+library(randomForest)
+library(tree)
+library(gbm)
+library(leaps)
+library(glmnet)
+library(rpart)
+library(rpart.plot)
+library(broom)
+library(corrplot)
+library(FactoMineR)
+library(factoextra)
+library(e1071)
+library(vip)
+```
+
+$~$
+
+## Reading in data
+```{r, warning=F, message=F}
+data.read <- read.csv("https://www.skra.is/library/Samnyttar-skrar-/Fyrirtaeki-stofnanir/Fasteignamat-2019/gagnasafn_ib_2018.csv", header=T, sep=";", dec=",", fileEncoding="latin1")
+```
+
+$~$
+
+# Cleaning data
+## Discarding unnecessary variables
+```{r, warning=F, message=F}
+data <- subset(data.read, select=c(rfastnum, kdagur, nuvirdi, teg_eign, svfn, byggar, efstah, 
+                                   fjmib,lyfta, ibm2, fjhaed, fjbilsk, fjbkar, fjsturt,
+                                   fjklos, fjeld, fjherb, fjstof, fjgeym, stig10, bilskurm2, 
+                                   svalm2, geymm2, matssvaedi, undirmatssvaedi, ibteg))
+```
+
+The variables that were not mentioned in the project description were discarded. So were variables that were very similar to other variables.
+
+$~$
+
+## Checking if variables are of the correct type
+```{r, warning=F, message=F}
+str(data)
+```
+
+A few variables were of incorrect type. Those were changed.
+
+$~$
+
+## Changing variable type
+```{r, warning=F, message=F}
+#Numerical to categorical
+data <- mutate(data, rfastnum=factor(rfastnum), svfn=factor(svfn), efstah=factor(efstah), 
+               lyfta=factor(lyfta), stig10=factor(stig10), matssvaedi=factor(matssvaedi), 
+               undirmatssvaedi=factor(undirmatssvaedi), ibteg=factor(ibteg), svfn=factor(svfn))
+
+#Categorical to numerical
+data$bilskurm2 <- as.numeric(data$bilskurm2)
+data$svalm2 <- as.numeric(data$svalm2)
+data$geymm2 <- as.numeric(data$geymm2)
+
+#Factor to date
+data$kdagur <- as.Date(data$kdagur, "%d.%m.%Y")
+
+#Fix variable byggar
+data$byggar <- as.Date(data$byggar, "%Y"); data$byggar <- lubridate::year(data$byggar)
+
+#Price in million ISK
+data$nuvirdi_m <- data$nuvirdi/1000
+
+str(data)
+```
+
+All variables now seemed to be of the correct type. Next we wanted to discard some useless observations and combine some categories of some of the categorical variables.
+
+$~$
+
+## Discarding some observations with missing data
+```{r, warning=F, message=F}
+nrow(data)
+data <- na.omit(data)
+nrow(data)
+```
+
+A total of 17 rows had missing values and these were removed. All seemed to involve the variable "byggar". 
+
+$~$
+
+## Discarding real estate outside the capital area
+```{r, warning=F, message=F}
+nrow(data)
+capital <- c(0, 1000, 1100, 1300, 1400, 1604) #Numbers for capital area
+data <- filter(data, svfn%in%capital)
+data <- mutate(data, svfn = fct_recode(svfn, Reykjavík="0", Kópavogur="1000",
+                                       Seltjarnarnes="1100", Garðabær="1300",
+                                       Hafnarfjörður="1400", Mosfellsbær="1604"))
+nrow(data)
+outsidecapital <- c(999)      #Number for Reykjavik rural area (single property)
+data <- filter(data, matssvaedi != outsidecapital)
+nrow(data)
+```
+
+We have in this step removed 14,645 observations that don´t belong to Reykjavík capital and now approximately 35 thousand observations remain. 
+
+$~$
+
+## Discarding some types of properties
+There are many types of properties (teg_eign categorical variable has 12 levels). Are all these categories necessary?
+```{r, warning=F, message=F}
+summary(data$teg_eign)
+```
+
+We see that several categories have no or very few observations (<5). 
+
+We remove the following categories with few (<5) observations: guest house, room, hotel, private property, working area. (Gistihús, Herbergi, Hótelstarfsemi, Séreign, Vinnustofa)
+```{r, warning=F, message=F}
+teg.eign.in <- c("Einbýlishús", "Fjölbýlishús", "Íbúðareign", "Íbúðarhús", "Ósamþykkt íbúð", "Parhús", "Raðhús") 
+data <- filter(data, teg_eign%in%teg.eign.in)
+data <- droplevels(data) # drop unused levels in the dataset
+nrow(data)
+```
+
+After this cleaning we have removed 8 properties and there are **35.107** observations left. 
+
+$~$
+
+## Translating types of properties into English
+```{r, warning=F, message=F}
+levels(data$teg_eign)
+data <- mutate(data, teg_eign = fct_recode(teg_eign, "single-family property"="Einbýlishús", 
+                                           "apartment building"="Fjölbýlishús",
+                                           "apartment"="Íbúðareign",
+                                           "apartment building"="Íbúðarhús",
+                                           "illegal apartment"="Ósamþykkt íbúð",
+                                           "two-family building"="Parhús",
+                                           "town-house"="Raðhús"))
+levels(data$teg_eign)
+```
+
+$~$
+
+## Combining categories of categorical variables
+```{r, warning=F, message=F}
+data$kdagur <- format(data$kdagur,'%Y') #Take away dates and only leave years
+
+data$byggar_cat <- cut(data$byggar, seq(1840,2020, 5)) #Cut year built every five years
+
+data$matssvaedi_samein <- as.factor(data$matssvaedi)
+data$matssvaedi_samein <- recode(data$matssvaedi_samein, "c('600','620','630','640','650','660','670','680')='Hafnarfjörður';
+                                 c('500','510','511','520','530','540')='GarðabærNorður';
+                                 c('550','560')='GarðabærSuður';
+                                 c('300','320','330','340','350','351')='Kópavogur';
+                                 c('800','810','820','840','290')='MosfellsbærVest/Kjalarnes';
+                                 c('850')='MosfellsbærHelgafell';
+                                 c('110','120','130','140','180','181')='Grafarvogur/Grafarholt';
+                                 c('700')='Álftanes';
+                                 c('400')='Seltjarnarnes';
+                                 c('20','25','31')='MiðbærRvk';                                
+                                 c('11','70','72','75')='VesturbærRvk';
+                                 c('80','85','90','91','100')='AusturRvk';
+                                 c('280','281','282','283','284')='AustAusturRvk';
+                                 c('150','160','161','170')='Breiðholt';
+                                 c('200','210','220','270')='Árbær'")
+```
+
+All dates for each year bought (kdagur) were combined - Or rather, dates and months were removed from kdagur so only the year remained.
+
+Also, new variable was made for the variable year built (byggar) by combining all observations every five years. 
+
+Finally, some of the categories in the variable area (matssvaedi) were renamed and combined.
+
+At last we combine some categories for undirmatssvaedi - __The ones that are by the seaside are grouped together.__
+```{r, warning=F, message=F}
+# group undirmatssvaedi
+seaside <- c('105','106','18','49','8','53','32','34','60','33','50','10','6','54','11','61','104','47','58','9','45','51','52','57')
+
+data$undirmatssvaedi_cat <- ifelse(data$undirmatssvaedi %in% seaside, "1", "0")                 
+table(data$undirmatssvaedi_cat)
+```
+
+$~$
+
+## Create a new variable for price per square meter (thousand ISK/m^2)
+```{r, warning=F, message=F}
+data <- mutate(data, Price_m2 = nuvirdi/ibm2)
+summary(data$Price_m2)
+
+ggplot(data = data, aes(y=Price_m2)) + geom_boxplot() + theme_classic()
+```
+
+The median price/m2 is around 345 thousand ISK/m2. 
+
+There is one outlier with price/m2 = 8652.91. Look more closely at the outlier. 
+```{r, warning=F, message=F}
+data %>% filter(Price_m2>2000)
+data <- filter(data, Price_m2<2000)
+nrow(data)
+```
+
+The outlier is a 2-room apartment in Mosfellsbær with a price of 956 million ISK - very unlikely. We remove this single observation. 
+
+```{r, warning=F, message=F}
+#Look at the distribution of price/m2 again
+summary(data$Price_m2)
+ggplot(data = data, aes(y=Price_m2)) + geom_boxplot() + theme_classic()
+
+cleanup = theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), 
+                panel.background = element_blank(), axis.line = element_line(color = "black")) #Make cleanup-code
+
+ggplot(data = data, aes(Price_m2, fill=teg_eign)) + geom_histogram(binwidth = 10) + theme_classic() + cleanup + scale_y_continuous(expand=c(0,0), limits=c(0,1750))
+```
+
+$~$
+
+# Constructing descriptive plots
+## Year of purchase
+```{r, warning=F, message=F, fig.height=5, fig.width=12}
+ggplot(data, aes(x=kdagur, y=nuvirdi_m)) +
+  geom_boxplot(fill='#A4A4A4', color="black") +
+  theme_classic() + ggtitle("Price with outliers") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Year of purchase") + ylab("Sale price (thousand ISK)") -> p1
+
+ggplot(data, aes(x=kdagur, y=nuvirdi_m)) +
+  geom_boxplot(outlier.shape=NA, fill='#A4A4A4', color="black") +
+  theme_classic() + scale_y_continuous(limits = c(0, 100)) + 
+  ggtitle("Price without outliers") + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Year of purchase") + ylab("Sale price (thousand ISK)") -> p2
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+```{r, warning=F, message=F, fig.height=5, fig.width=12}
+ggplot(data, aes(x=kdagur, y=Price_m2)) +
+  geom_boxplot(fill='#A4A4A4', color="black") +
+  theme_classic() + ggtitle("Price/m2 with outliers") +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Year of purchase") + ylab("Sale price (thousand ISK)") -> p1
+
+ggplot(data, aes(x=kdagur, y=Price_m2)) +
+  geom_boxplot(outlier.shape=NA, fill='#A4A4A4', color="black") +
+  theme_classic() + scale_y_continuous(limits = c(0, 1000)) + 
+  ggtitle("Price/m2 without outliers") + 
+  theme(plot.title = element_text(hjust = 0.5)) +
+  xlab("Year of purchase") + ylab("Sale price (thousand ISK)") -> p2
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+We see that real estate prices have been steadily increasing in the last few years.
+
+$~$
+
+## Year of construction
+```{r, warning=F, message=F, fig.height=6, fig.width=12}
+ggplot(data = data, aes(byggar, fill=teg_eign)) + geom_histogram(binwidth = 2) + theme_classic() +
+  labs(x="Year built", y="Number of properties", fill="Type of property") + scale_y_continuous(expand=c(0,0), limits=c(0,2000))
+```
+
+```{r, warning=F, message=F, fig.height=8, fig.width=12}
+ggplot(data, aes(x=byggar_cat, y=Price_m2)) +
+  geom_boxplot(fill='#A4A4A4', color="black") +
+  theme_classic() + ggtitle("Price/m2 and year of construction") +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  xlab("Year of construction") + ylab("Sale price (thousand ISK)")  + 
+  geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+Thus the oldest (built before 1940) and newest (built after 2010) properties are most expensive. The brand new properties built after 2015 have the highest price. 
+
+#### Byggar (sorted by meðalfermetraverð)
+The highest price/m2 are for the years 2016-2018, and also for a very few old houses built before or around 1900. 
+Thus the oldest (built before 1940) and newest (built after 2010) properties are most expensive. 
+
+#### Byggar (sorted by year of construction)
+##### Number of constructions per period and price/m2
+The years on top regarding number of constructions (numbers and price listed) were 2006 and 2007 and 2004, just before the economic "crash" (Hrunið) in 2008.
+
+1. 2006	992	347.3
+2. 2007	946	337.5	
+3. 2004	941	348.3
+4. 2014	856	430.3	
+5. 1978	768	321.2
+
+The year 2009 just after the crash shows a very sharp downturn in the construction activity - more than 7-fold decrease. However, the price stayed similar. The years 2009 and 2010 were also slow, but then the recovery started in 2013 and really exploded in 2014 followed by some decrease in 2015. 
+
+75. 2009	138	336.1
+74. 2011	156	333.5	
+66. 2010	230	366.2
+67. 2012	190	346.6	
+26. 2013	475	356.9	
+11. 2015	652	434.2
+
+$~$
+
+## Property size
+```{r, warning=F, message=F, fig.height=5, fig.width=12}
+cleanup_point = 
+  theme(panel.background = element_blank(), axis.line = element_line(color = "black"), panel.grid.major = element_blank(), legend.key=element_blank()) #Cleanup for scatterplot
+
+ggplot(data, aes(x=ibm2, y=nuvirdi, color=teg_eign)) + geom_point() + 
+  labs(x="Property size", y="Sale price", color="Type of property") + 
+  cleanup_point -> p1
+
+ggplot(data, aes(x=ibm2, y=Price_m2, color=teg_eign)) + geom_point() + 
+  labs(x="Property size", y="Price/m2", color="Type of property") + 
+  cleanup_point -> p2
+
+grid.arrange(p1, p2, ncol = 2)
+```
+
+We see that price generally increases with property size but price/m2 tends to decrease.
+
+$~$
+
+## Location
+```{r, warning=F, message=F, fig.width=12}
+ggplot(data, aes(matssvaedi, fill=teg_eign)) + geom_bar() + theme_classic() + 
+  xlab("Area") + ylab("Number of properties") + labs(fill="Type of property") + scale_y_continuous(expand=c(0,0), limits=c(0,2500)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+$~$
+
+#### After merging areas
+```{r, warning=F, message=F, fig.width=12}
+ggplot(data, aes(matssvaedi_samein, fill=teg_eign)) + geom_bar() + theme_classic() + 
+  xlab("Area") + ylab("Number of properties") + labs(fill="Type of property") +
+  scale_y_continuous(expand=c(0,0), limits=c(0,6500)) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+$~$
+
+## Location ~ price
+```{r, warning=F, message=F, fig.width=12}
+na.omit(data) %>% 
+  group_by(data$matssvaedi) %>%
+  summarize(Count=n(),
+            Meðalfermetraverð = round(mean(Price_m2),1), 
+            Staðalfrávik = round(sd(Price_m2),1),) %>%
+  mutate(Percent = round((Count/sum(Count)*100))) %>%
+  arrange(desc(Meðalfermetraverð))
+```
+
+We see that are nr. 31 has by far the highest price/m2 (Miðbær:Suður-Þingholt).
+Second comes nr. 550 (Garðabær:Urriðaholt) and then nr. 20 (Miðbær:Frá Tjörn að Snorrabraut). 
+
+$~$
+
+### Price/m2 ~ area (matssvaedi combined)
+#### Red line indicates median price/m2
+```{r, warning=F, message=F, fig.height=6, fig.width=12}
+ggplot(data, aes(x=matssvaedi_samein, y=Price_m2)) + geom_boxplot() + 
+  theme_classic() + labs(x="Area", y="Price per m^2 (thousand ISK)") + ylim(0,1000) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+$~$
+
+### Byggar ~ location (combined)
+```{r, warning=F, message=F}
+ggplot(data, aes(x=matssvaedi_samein, y=byggar)) +
+  geom_boxplot(fill='#A4A4A4', color="black") +
+  theme_classic() + ggtitle("Location vs. year of construction") +
+  theme(plot.title = element_text(hjust = 0.5), 
+        axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  xlab("Location (matssvaedi)") + ylab("Year of construction") 
+```
+
+Some properties with really high prices in RvkMiðbær - where are these located exactly (sub-areas/undirmatssvaedi)?
+```{r, warning=F, message=F}
+data.s <- data[rev(order(data$Price_m2, na.last = FALSE)), ]
+data.s[1:20,]
+remove(data.s)
+```
+
+It appears that sub-area nr. 51 (101-Skuggahverfi-Sjávarsíða) comes up very frequently.
+
+$~$
+
+#### Median price/m2 for sub-area nr. 51
+```{r, warning=F, message=F}
+data %>% filter(undirmatssvaedi == "51") %>%
+  summarize(Count=n(),
+            Meðalfermetraverð = round(mean(Price_m2),1), 
+            Staðalfrávik = round(sd(Price_m2),1),) %>%
+  mutate(Percent = round((Count/sum(Count)*100))) %>%
+  arrange(desc(Meðalfermetraverð))
+```
+
+So the median price/m2 for properties in this sub-area is very high, or 613 compared to 345 for the whole capital area. 
+
+$~$
+
+#### Look more closely at sub-areas (undirmatssvaedi)
+```{r, warning=F, message=F, fig.width=12}
+data %>% filter(undirmatssvaedi != "0") %>% 
+  ggplot(aes(x=undirmatssvaedi, y=Price_m2)) + geom_boxplot() + 
+  theme_classic() + labs(x="Area", y="Price per m^2 (thousand ISK)") + ylim(0,1000) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+$~$
+
+#### What are the sub-areas with the highest price/m2?
+```{r, warning=F, message=F}
+data %>% filter(undirmatssvaedi != "0") %>% 
+  group_by(undirmatssvaedi) %>%
+  summarize(Count=n(),
+            Meðalfermetraverð = round(mean(Price_m2),1), 
+            Staðalfrávik = round(sd(Price_m2),1),) %>%
+  mutate(Percent = round((Count/sum(Count)*100))) %>%
+  arrange(desc(Meðalfermetraverð))
+```
+
+**The most expensive properties are in sub-areas:**
+
+- 51: 101 - Skuggahverfi - sjávarsíða (Reykjavid mid-town seaside)
+- 11: Suðurströnd Seltjarnarness (Seltjarnarnes south seaside)
+- 57: Þorragata (close to Skerjafjörður)
+- 45: Hrólfsskálamelur (Seltjarnarnes south seaside)
+- 10: Skildinganes (Skerjafjörður seaside)
+- 9: Einimelur (Reykjavik-West)
+
+$~$
+
+## Number of properties per category:
+```{r, warning=F, message=F}
+data %>% group_by(teg_eign) %>%
+  summarize(Count=n(),
+            MedianPriceM2 = round(median(Price_m2)),
+            MeanPriceM2 = round(mean(Price_m2),1), 
+            StdDev = round(sd(Price_m2),1),) %>%
+  mutate(Percent = round((Count/sum(Count)*100))) %>%
+  arrange(desc(MeanPriceM2)) %>% kable() %>%
+ kable_styling(full_width = F, position = "left", bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  column_spec(1:6, width = "10em")
+```
+
+```{r, warning=F, message=F}
+data %>%
+  ggplot(aes(x=teg_eign, y=Price_m2)) + geom_boxplot() + 
+  theme_classic() + labs(x="Type of property", y="Price per m^2 (thousand ISK)") + ylim(0,1200) + 
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+  geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+### Look more closely at apartment buildings
+```{r, warning=F, message=F}
+data %>% filter(teg_eign == "apartment building") %>% 
+  group_by(matssvaedi_samein) %>%
+  summarize(Count=n(),
+            MedianPriceM2 = round(median(Price_m2)),
+            MeanPriceM2 = round(mean(Price_m2),1), 
+            StdDev = round(sd(Price_m2),1),) %>%
+  mutate(Percent = round((Count/sum(Count)*100))) %>%
+  arrange(desc(MeanPriceM2)) %>% kable() %>%
+ kable_styling(full_width = F, position = "left", bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  column_spec(1:6, width = "10em")
+```
+
+### Look more closely at illegal apartments
+```{r, warning=F, message=F}
+data %>% filter(teg_eign == "illegal apartment") %>% 
+  group_by(matssvaedi_samein) %>%
+  summarize(Count=n(),
+            MedianPriceM2 = round(median(Price_m2)),
+            MeanPriceM2 = round(mean(Price_m2),1), 
+            StdDev = round(sd(Price_m2),1),) %>%
+  mutate(Percent = round((Count/sum(Count)*100))) %>%
+  arrange(desc(MeanPriceM2)) %>% kable() %>%
+ kable_styling(full_width = F, position = "left", bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  column_spec(1:6, width = "10em")
+```
+
+## Stig10 (byggingarstig)
+```{r, warning=FALSE, message=FALSE}
+ggplot(data, aes(x=stig10, y=Price_m2)) + geom_boxplot() + 
+theme_classic() + labs(x="stig10", y="Price per m^2 (thousand ISK)") + ylim(0,1000) +  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+Apparently stig10 4-7 are more expensive. Reduce stig10 to two variables: >=7 and >7.
+```{r, warning=F, message=F}
+data$stig10_sam <- as.factor(data$stig10)
+
+data$stig10_sam <- recode(data$stig10_sam,
+                          "c('4','5.5','7','7.1')='low';
+                          c('7.6','7.9','8','8.3','8.4','8.5','8.6','8.8','8.9','9','9.1','9.2','9.3','9.4','9.5','9.6','9.7','9.8','9.9','10')='high'")
+
+levels(data$stig10_sam)
+```
+
+```{r, warning=F, message=F}
+ggplot(data, aes(x=stig10_sam, y=Price_m2)) + geom_boxplot() + 
+theme_classic() + labs(x="stig10", y="Price per m^2 (thousand ISK)") + ylim(0,1200) +  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+## Elevators
+```{r, warning=F, message=F}
+ggplot(data, aes(x=lyfta, y=Price_m2)) + geom_boxplot() + 
+theme_classic() + labs(x="Fjöldi lyfta", y="Price per m^2 (thousand ISK)") + ylim(0,1200) +  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+geom_hline(yintercept=345, linetype="dashed", color = "red", size=1)
+```
+
+$~$
+
+# Variable selection
+## Check for correlation
+```{r, warning=F, message=F, fig.width=8, fig.height=8}
+data1<- data.frame(data)
+data1[,c('nuvirdi','nuvirdi_m','rfastnum','Price_m2','matssvaedi','matssvaedi_samein')] <- list(NULL)
+
+data_n <- mutate_if(data1, is.factor, ~ as.numeric(levels(.x))[.x]) #factor to numeric
+data_n <- mutate_if(data_n, is.character, ~ as.numeric(levels(.x))[.x]) #character to numeric
+
+cor<-cor(data_n,method="spearman")
+round(cor,2)
+
+corrplot(cor, method="circle")
+```
+
+So, order by the coefficients,
+
+=> ibm2(property area) is correlated with fjherb(no of rooms), fjklos(no of toilets), bilskurm2(garage area), ibteg(type of property), fjhaed(no of floors in property),
+
+=> lyfta(whether there is elavator or not) is correlated with fjbilsk(no of garage), efstah(wheter the room is on top floor)
+
+**==> We decide to remove fjherb, fjklos, bilskurm2, ibteg, fjhaed, fjbilsk, efstah.**
+
+$~$
+
+## Remove variables that have clear correlations with other variables
+We remove the following variables that have clear correlations with other variables:
+- fjherb, fjklos, bilskurm2, ibteg, fjhaed, fjbilsk, efstah
+- rfastnum (not necessary for predictions)
+
+### Make a smaller dataset with fewer variables for prediction models
+```{r, warning=F, message=F}
+data.small <- subset(data, select = c(kdagur, nuvirdi, teg_eign, svfn, byggar, fjmib, lyfta, ibm2, fjbkar, fjsturt, fjeld, fjstof, fjgeym, svalm2, geymm2, undirmatssvaedi_cat, matssvaedi_samein, byggar_cat))
+```
+
+## PCA
+```{r, warning=F, message=F}
+data_n[,c('fjherb','fjklos','bilskurm2','ibteg','fjhaed','fjbilsk','efstah')] <- list(NULL) #Make a smaller dataset for PCA
+data_n <- dummy.data.frame(data_n, names=c("kdagur", "teg_eign", "svfn", "byggar_cat", "stig10_sam","undirmatssvaedi_cat"))
+pr.out  = prcomp(scale(data_n), scale=TRUE)
+summary(pr.out)
+pve = 100*pr.out$sdev^2/sum(pr.out$sdev^2)
+plot(pve, type="o", ylab="PVE", xlab="Principal Component", col="blue")
+```
+
+We can see that the first 5 PC make up 59.3% of the total variance explained.  However, when we look at the graph, we see that while each of the first four principal components explain a substantial amount of variance, there is a marked decrease in the variance explained by further principal components. This suggests that there may be little benefit to examining more than four or so principal components.
+
+```{r, warning=F, message=F}
+#Loadings of PC
+rotation <- pr.out$rotation
+rotation[,1:5]
+```
+
+Looking at the loadings of the first 5 PC (loadings <-0.4 or >0.4), we can see that:
+
+- PC1: (-) fjstof contributes negatively
+
+- PC2: (-) byggar, fjsturt, ibm2 contribute negatively
+
+- PC3: (+) fjbkar, svalm2 contribute positively; (-) fjsturt contributes negatively
+
+- PC4: (+) ibm2 contributes positively; (-) fjmib, fjeld contribute negatively
+
+- PC5: (+) stig10, undirmatssvaedi contribute positively; (-) fjgeym contributes negatively
+
+$~$
+
+# Predicting sale prices (nuvirdi)
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+#Create a training and test set
+set.seed(3)
+ind <- sample(nrow(data.small),nrow(data.small)/2)
+train <- data.small[ind,]
+test <- data.small[-ind,]
+```
+
+## Simple linear model 
+### Using most numerical variables and small data set (numerical variables)
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+lm <- lm(nuvirdi ~ svfn + byggar + fjmib + lyfta + ibm2 + fjbkar + fjsturt + fjeld + fjstof+ fjgeym + svalm2 + geymm2, data=data.small)
+
+tidy(lm)
+
+plot_coeffs <- function(lm) {
+  coeffs <- coefficients(lm)
+  mp <- barplot(coeffs, col="#3F97D0", xaxt='n', 
+                main="Regression Coefficients")
+  lablist <- names(coeffs)
+  text(mp, par("usr")[3], labels = lablist, srt = 45, 
+       adj = c(1.1,1.1), xpd = TRUE, cex=0.6)
+}
+
+plot_pval <- function(lm) {
+  p_values <- coef(summary(lm))[,4]
+  mp <- barplot(p_values, col="#3F97D0", xaxt='n', 
+                main="P-values")
+  lablist <- names(p_values)
+  text(mp, par("usr")[3], labels = lablist, srt = 45, 
+       adj = c(1.1,1.1), xpd = TRUE, cex=0.6)
+}
+
+par(mfrow =c(2,1))
+plot_coeffs(lm)
+plot_pval(lm)
+```
+
+Effects of variables on price (nuvirdi) in model: 
+
+* Town Kópavogur does not differ from Reykjavik (baseline)
+* Towns Hafnarfjörður and Mosfellsbær have negative effects (cheaper).
+* Towns Garðabær and Seltjarnarnes have positive effects (expensive). 
+* Byggar has no effect. 
+* Lyfta has a positive effect. 
+* Fjbkar and fjeld have negative effects. 
+* Fjsturt, fjstof and fjgeym have positive effects. 
+* Svalm2 has a negative effect.
+* Geymm2 has a positive effect. 
+
+### Using most numerical variables on training set and then fit a prediction model on test set
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+lm2 <- lm(nuvirdi ~ svfn + byggar + fjmib + lyfta + ibm2 + fjbkar + fjsturt + fjeld + fjstof+ fjgeym + svalm2 + geymm2, data=train)
+
+#Calculate test MSE
+lm.pred = predict(lm2,test)
+mean((lm.pred-test$nuvirdi)^2)
+```
+
+$~$
+
+## General linear model
+### Using certain groups of variables and small data set
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+#Exclude some variables that include svaedi and/or have many categories
+glm.fit <- glm(nuvirdi ~. - kdagur - matssvaedi_samein -byggar_cat, data=data.small)
+
+tidy(glm.fit)
+
+plot_coeffs <- function(glm.fit) {
+  coeffs <- coefficients(glm.fit)
+  mp <- barplot(coeffs, col="#3F97D0", xaxt='n', 
+                main="Regression Coefficients")
+  lablist <- names(coeffs)
+  text(mp, par("usr")[3], labels = lablist, srt = 45, 
+       adj = c(1.1,1.1), xpd = TRUE, cex=0.6)
+}
+
+plot_pval <- function(glm.fit) {
+  p_values <- coef(summary(glm.fit))[,4]
+  mp <- barplot(p_values, col="#3F97D0", xaxt='n', 
+                main="P-values")
+  lablist <- names(p_values)
+  text(mp, par("usr")[3], labels = lablist, srt = 45, 
+       adj = c(1.1,1.1), xpd = TRUE, cex=0.6)
+}
+
+par(mfrow =c(2,1))
+plot_coeffs(glm.fit)
+plot_pval(glm.fit)
+```
+
+Effects of variable on price:  
+
+* Towns: Again Seltjarnarnes and Garðabær have positive effects compared to Reykjavik
+* Towns: Again Hafnarfjörður and Mosfellsbær have negative effects compared to Rvk
+* Byggar now has a small posive effect
+* Lyfta >0 has a positive effect compared to no Lyfta (Lyfta = 0)
+* Fjmib has a large positive effect
+* Fjbkar and fjeld have negative effects 
+* Fjsturt, fjstof and fjgeym have positive effects 
+* Geymm2 has a positive effect
+* Teg_eign: all categories had negative effects compared to "single-family property" (baseline), especially apartments 
+* Stig10: low building stage has a positive effect
+* Undirmatssvaedi_cat: has a positive effect
+
+**Summary:**
+
+- Good: Single-family properties, low building stage
+- Good: Seltjarnarnes, Garðabær, Seaside sub-area
+- Bad: Hafnarfjörður, Mosfellsbær
+- Good: Elevators, many apartments per building
+- Good: Many showers, living rooms, storage rooms, large storage rooms
+- Bad: Many bathtubs, many kitchens
+
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+#General linear model to predict price based on area and byggar categories
+glm.fit2 <- glm(nuvirdi ~ matssvaedi_samein, data=data.small)
+
+tidy(glm.fit2)
+
+plot_coeffs <- function(glm.fit2) {
+  coeffs <- coefficients(glm.fit2)
+  mp <- barplot(coeffs, col="#3F97D0", xaxt='n', 
+                main="Regression Coefficients")
+  lablist <- names(coeffs)
+  text(mp, par("usr")[3], labels = lablist, srt = 45, 
+       adj = c(1.1,1.1), xpd = TRUE, cex=0.6)
+}
+
+plot_pval <- function(glm.fit2) {
+  p_values <- coef(summary(glm.fit2))[,4]
+  mp <- barplot(p_values, col="#3F97D0", xaxt='n', 
+                main="P-values")
+  lablist <- names(p_values)
+  text(mp, par("usr")[3], labels = lablist, srt = 45, 
+       adj = c(1.1,1.1), xpd = TRUE, cex=0.6)
+}
+
+par(mfrow =c(2,1))
+plot_coeffs(glm.fit2)
+plot_pval(glm.fit2)
+```
+
+Areas comapared to AustAusturRvk
+
+- Again Garðabær and Seltjarnarnes have positive effects (both North and South)
+- Breiðholt and Árbær have the largest negative effects, as well as Reykjavík-East and Hafnarfjörður
+- Álftanes, Kópavogur and Mosfellsbær have no effects
+
+### Performing on training set and then fit a prediction model on test set
+```{r, fig.width=6, fig.height=6}
+#Exclude some variables that include svaedi and/or have many categories
+glm.fit4 <- glm(nuvirdi ~. - kdagur - matssvaedi_samein -byggar_cat, data=train)
+
+#Calculate test MSE
+glm.fit4$xlevels[["byggar_cat"]] <- union(glm.fit4$xlevels[["byggar_cat"]], levels(test$byggar_cat))
+glm.pred = predict(glm.fit4,newdata =test)
+mean((glm.pred-test$nuvirdi)^2)
+```
+
+$~$
+
+## The Lasso with selected variables 
+#### (remove variables with many categories)
+```{r, message=FALSE, warning=FALSE}
+
+set.seed(2)
+#Creata an x matrix for the model fit and a lambda grid
+x <- model.matrix(nuvirdi ~ . -nuvirdi -lyfta -matssvaedi_samein -byggar_cat, data.small)
+y <- data.small$nuvirdi
+lambda <- 10^seq(10, -2, length = 100)
+
+#Split the data into training and validation sets
+train.l = sample(nrow(x), nrow(x)/2)
+test.l = (-train.l)
+ytest = y[test.l]
+
+#Perform cross-validation to find the optimal lambda value for lasso testing and plot lambda vs. MSE
+cv.out <- cv.glmnet(x[train.l,], y[train.l], alpha = 1)
+bestlam <- cv.out$lambda.min
+bestlam
+plot(cv.out)
+
+#Fit a lasso model using the training data set and predict the best model using the test set. 
+lasso.mod <- glmnet(x[train.l,], y[train.l], alpha = 1, lambda = bestlam)
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = x[test.l,])
+
+#Calculage the MSE
+mean((lasso.pred-ytest)^2)
+
+#Find the coefficients for the best model defined by lasso.
+lasso.coef  <- predict(lasso.mod, type = 'coefficients', s = bestlam)
+lasso.coef %>% tidy()
+
+coef(lasso.mod, s = bestlam) %>%
+  broom::tidy() %>%
+  filter(row != "(Intercept)") %>%
+  top_n(20, wt = abs(value)) %>%
+  ggplot(aes(value, reorder(row, value), color = value > 0)) +
+  geom_point(show.legend = FALSE) +
+  ggtitle("Top 20 influential variables (lasso penalty)") +
+  xlab("Coefficient") +
+  ylab(NULL) + theme_bw()
+```
+
+#### The Lasso is optimal when around 22 variables are included.
+#### The most influential variables are:
+
+- positive effect: kdagur (2018, 2017, 2016, 2015) and towns(Seltjarnarnes, Garðabær) and seaside subareas (undirmatssvaedi)
+- negative effect: property type (illegal apartments, apartments, town-house), towns (Hafnarfjörður, Mosfellsbær)
+
+$~$
+
+## Forward selection
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+regfit.fwd = regsubsets (nuvirdi ~., data = train, method = "forward", nvmax = 19)
+reg.summary.fwd <- summary(regfit.fwd)
+
+reg.summary.fwd$adjr2
+which.max(reg.summary.fwd$adjr2)
+plot(reg.summary.fwd$adjr2, xlab = "Number of Variables", ylab="Adj R^2", type = "b", col="blue")
+```
+
+Forward selection: Using all variables gives the best prediction.  
+
+```{r, warning=F, message=F, fig.height=10, fig.width=10}
+#Test set
+regfit.fwd2 = regsubsets (nuvirdi ~., data = test, method = "forward", nvmax = 19)
+reg.summary.fwd2 <- summary(regfit.fwd2)
+
+reg.summary.fwd2$adjr2
+which.max(reg.summary.fwd2$adjr2)
+plot(reg.summary.fwd2$adjr2, xlab = "Number of Variables", ylab="Adj R^2", type = "b", col="blue")
+
+test.mat=model.matrix (nuvirdi~.,data=test)
+val.errors =rep(NA ,19)
+  for(i in 1:19){
+  coefi = coef(regfit.fwd2,id=i)
+  pred=test.mat[,names(coefi)]%*% coefi
+  val.errors[i]= mean((test$nuvirdi-pred)^2) }
+val.errors
+which.min(val.errors)
+min(val.errors)
+```
+
+$~$
+
+## Tree based methods
+### Regression tree
+```{r, warning=F, message=F, fig.width=12, fig.height=8}
+tree <- tree(formula = nuvirdi ~. - byggar_cat, data = data.small)
+tree
+summary(tree)
+plot(tree)
+text(tree)
+tree.pred = predict(tree, newdata=test)
+mean((tree.pred-test$nuvirdi)^2)
+```
+
+#### In this regression tree, three variables were used for tree construction:
+
+- imb2
+- kdagur
+- matssvaedi_samein:
+
+- AustAusturRvk, Álftanes, Árbær, Breiðholt, Grafarvogur/Grafarholt, Hafnarfjörður, Kópavogur, MosfellsbærHelgafell, MosfellsbærVest/Kjalarnes 
+
+vs. 
+
+- AusturRvk, GarðabærNorður, GarðabærSuður, MiðbærRvk, Seltjarnarnes, VesturbærRvk
+
+$~$ 
+
+### Use a different function for building and drawing a decision tree (use all variables in data.small):
+```{r, warning=F, message=F}
+# Create a decision tree model
+
+data.small$price_cat  <- ifelse(data.small$nuvirdi>median(data.small$nuvirdi), "1", "0")
+data.small <- mutate(data.small, price_cat=fct_recode(price_cat, Low="0", High="1"))
+
+data.small$price_cat  <- ifelse(data.small$nuvirdi > median(data.small$nuvirdi), "1", "0")
+data.small <- mutate(data.small, price_cat = fct_recode(price_cat, Low ="0", High="1"))
+tree2 <- rpart(price_cat ~ .-nuvirdi, data = data.small)
+#summary(tree2)
+
+# Visualize the decision tree with rpart.plot
+rpart.plot(tree2, box.palette="RdBu", shadow.col="gray", nn=TRUE)
+```
+
+#### Using this tree function the most important variables were:
+
+- ibm2: 45%      
+- teg_eign: 15%         
+- kdagur: 16% 
+- fjstof: 10%   
+- fjsturt: 4%
+- matssvaedi_samein: 4%
+- svfn: 4%
+
+$~$
+
+## Random Forest method
+```{r, warning=F, message=F}
+#set.seed (1)
+#rf =randomForest(nuvirdi~.-byggar_cat,data=train, mtry=4, importance =TRUE) #remove byggar_cat
+#rf.pred = predict(rf,newdata =test)
+#mean((rf.pred-test$nuvirdi)^2)
+#vip(rf, num_features = 25, bar = FALSE) + ggtitle("Variable importance")  + theme_bw()
+```
+
+$~$
+
+## Support Vector Machine
+### SVM linear
+```{r, warning=F, message=F}
+#tune.out=tune(svm ,nuvirdi~., data=train,kernel ="linear", ranges =list(cost=c(1,2, 5,10,100), gamma=c(2,3,4) ))
+#svm.fit =svm(nuvirdi~., data=train, kernel ="linear", cost =2)
+#svmpred = predict(svm.fit,test)
+#mean((svmpred-test$nuvirdi)^2)
+```
+
+$~$
+
+## Most optimal model
+
+- Among the methods above, we can see that the **random forest** gives the smallest test MSE. 
+- And that the most important variables among all methods are: kdagur, teg_eign, svfn, ibm2, matssvaedi_samein, fjsturt, lyfta, byggar, undirmatssvaedi_cat, fjstof
+
+```{r, warning=F, message=F}
+#Create new data set with the variables above
+data.small2 <- subset(data.small, select = c(kdagur, teg_eign, svfn, ibm2, matssvaedi_samein, fjsturt, lyfta, byggar, undirmatssvaedi_cat, fjstof, nuvirdi))
+set.seed(3)
+
+#Create training & test set
+train2 <- data.small[ind,]
+test2 <- data.small[-ind,]
+
+#Random Forest
+#rf2 =randomForest(nuvirdi~.,data=train2, mtry=3, importance =TRUE)
+#rf.pred2 = predict(rf2,newdata =test2)
+#mean((rf.pred2-test2$nuvirdi)^2)
+```
+
+$~$
+
+# Predicting values of a categorical variable
+Like mentioned earlier, the regression tree earlier split the areas (matssvaedi) into two groups by price:
+
+Low price areas:
+
+- AustAusturRvk, 
+- AusturRvk, 
+- Álftanes, 
+- Árbær, 
+- Breiðholt, 
+- Grafarvogur/Grafarholt, 
+- Hafnarfjörður, 
+- Kópavogur, 
+- MosfellsbærHelgafell, 
+- MosfellsbærVest/Kjalarnes 
+
+High price areas:
+
+- GarðabærNorður, 
+- GarðabærSuður, 
+- MiðbærRvk, 
+- Seltjarnarnes, 
+- VesturbærRvk
+
+We start with creating a new binary variable that splits areas into these two categories.
+```{r, warning=F, message=F}
+data.small <- mutate(data.small, matssvaedi_cat = fct_recode(matssvaedi_samein, "0"="AustAusturRvk",
+                                                             "0"="AusturRvk",
+                                                             "0"="Álftanes",
+                                                             "0"="Árbær",
+                                                             "0"="Breiðholt",
+                                                             "0"="Grafarvogur/Grafarholt",
+                                                             "0"="Hafnarfjörður",
+                                                             "0"="Kópavogur",
+                                                             "0"="MosfellsbærHelgafell",
+                                                             "0"="MosfellsbærVest/Kjalarnes",
+                                                             "1"="GarðabærNorður",
+                                                             "1"="GarðabærSuður",
+                                                             "1"="MiðbærRvk",
+                                                             "1"="Seltjarnarnes",
+                                                             "1"="VesturbærRvk"))
+summary(data.small$matssvaedi_cat)
+data.small$matssvaedi_cat <- as.numeric(data.small$matssvaedi_cat)
+
+# Create a new dataset without connected variables (like matssvaedi_samein)
+data.cat <- subset(data.small, select = c(kdagur, nuvirdi, teg_eign, byggar, fjmib, lyfta, ibm2, fjbkar, fjsturt, fjeld, fjstof, fjgeym, svalm2, geymm2, matssvaedi_cat))
+#Make train and test datasets
+train.cat <- data.cat[ind,] 
+test.cat <- data.cat[-ind,]
+```
+
+There are 27.777 properties in the "Low price areas" and 7329 properties in the "High price areas".
+
+$~$
+
+## Decision tree
+```{r, warning=F, message=F}
+# Create a decision tree model
+tree.cat <- rpart(matssvaedi_cat~., data = train.cat)
+# Visualize the decision tree with rpart.plot
+rpart.plot(tree.cat, box.palette="RdBu", shadow.col="gray", nn=TRUE)
+# Test on test set
+tree.pred = predict(tree.cat, test.cat)
+(err.tree <- mean((tree.pred-test.cat$matssvaedi_cat)^2))
+```
+
+__Results:__ 
+
+The variable byggar seems to matter most, that is, in recent years, more properties have been built in the "Low price areas" (because they are newer - see subchapter "Byggar ~ location (combined)"). There also seem to be different number of elevators in properties depending on our variable (most likely also linked to age (byggar), newer properties are likely to have more elevators than older ones). 
+
+We obtain a test error of roughly 14%.
+
+$~$
+
+## LDA
+```{r, warning=F, message=F}
+lda.fit <- lda(matssvaedi_cat~., data=train.cat)
+lda.fit
+
+lda.pred <- predict(lda.fit, test.cat)
+table(data=lda.pred$class, prediction=test.cat$matssvaedi_cat)
+
+(err.LDA <- mean(lda.pred$class!=test.cat$matssvaedi_cat))
+```
+
+__Results:__ 
+
+LDA with the the same variables as in the decision tree gives a test error of around 17%.
+
+$~$
+
+## Lasso
+```{r, warning=F, message=F}
+#Creata a matrix for the model fit and a lambda grid
+x <- model.matrix(matssvaedi_cat~., data.cat)
+y <- data.cat$matssvaedi_cat
+lambda <- 10^seq(10, -2, length = 100)
+
+#Split the data into training and validation sets
+set.seed(1)
+train.l = sample(nrow(x), nrow(x)/2)
+test.l = (-train.l)
+ytest = y[test.l]
+
+#Perform cross-validation
+cv.out <- cv.glmnet(x[train.l,], y[train.l], alpha = 1)
+(bestlam <- cv.out$lambda.min)
+
+plot(cv.out)
+
+#Fit a lasso model using the training data set and predict the best model using the test set. 
+lasso.mod <- glmnet(x[train.l,], y[train.l], alpha = 1, lambda = bestlam)
+lasso.pred <- predict(lasso.mod, s = bestlam, newx = x[test.l,])
+
+#Calculage the test error
+(err.lasso <- mean((lasso.pred-ytest)^2))
+
+#Find the coefficients for the best model defined by lasso.
+lasso.coef  <- predict(lasso.mod, type = 'coefficients', s = bestlam)
+lasso.coef %>% tidy()
+
+coef(lasso.mod, s = bestlam) %>%
+broom::tidy() %>%
+filter(row != "(Intercept)") %>%
+top_n(20, wt = abs(value)) %>%
+ggplot(aes(value, reorder(row, value), color = value > 0)) +
+geom_point(show.legend = FALSE) +
+ggtitle("Top 20 influential variables (lasso penalty)") +
+xlab("Coefficient") +
+ylab(NULL) + theme_bw()
+```
+
+__Results:__ 
+
+Lasso selects a model with with lambda = 0.0001131944 where the test error of 13%.
+
+The Lasso is optimal when around 25 variables are included.
+
+The most influential variables are:
+
+  * positive effect: teg_eign (apartment building, illegal apartment) and lyfta (5, 4, 3)
+  * negative effect: kdagur (2017, 2018, 2016), lyfta (6)
+
+$~$
+
+## Comparing test error of the models
+```{r, warning=F, message=F}
+test.err <- matrix(c(err.tree, err.LDA, err.lasso), ncol=3)
+colnames(test.err) <- c("Tree","LDA","Lasso")
+
+round((test.err),3) %>% kable() %>%
+ kable_styling(full_width = F, position = "left", bootstrap_options = c("striped", "hover", "condensed")) %>% 
+  column_spec(1:3, width = "5em")
+```
+
+__Results:__ 
+
+The Lasso performed best on the dataset with test error of 13%.
+
+$~$
+
+__Interpretation:__
+
+According to the Lasso, the variables contributing most to the split between low price areas and high price areas are the types of apartments and number of elevators in the building. That suggests that the types of properties found in low price areas differ from the properties found in high price areas. In high price areas, one is likely to find apartment buildings with some elevators (those are most likely the newer, more expensive areas). Also, according to the model, properties in high price areas have been baught recently, in the last couple of years.
